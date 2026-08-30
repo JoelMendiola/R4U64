@@ -8,6 +8,8 @@ import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+import rightHandModelUrl from '../hand-rigged-r.glb';
+import leftHandModelUrl from '../hand-rigged-l.glb';
 import './style.css';
 
 const sceneHost = document.querySelector('#scene');
@@ -168,10 +170,10 @@ function prepareHandTemplate(gltfScene, animations) {
   return wrapper;
 }
 
-new GLTFLoader().load('/hand-rigged-r.glb', ({ scene: gltfScene, animations }) => {
+new GLTFLoader().load(rightHandModelUrl, ({ scene: gltfScene, animations }) => {
   handModelTemplates.Right = prepareHandTemplate(gltfScene, animations);
 });
-new GLTFLoader().load('/hand-rigged-l.glb', ({ scene: gltfScene, animations }) => {
+new GLTFLoader().load(leftHandModelUrl, ({ scene: gltfScene, animations }) => {
   handModelTemplates.Left = prepareHandTemplate(gltfScene, animations);
 });
 

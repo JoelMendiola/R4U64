@@ -1,0 +1,26 @@
+:root { color-scheme: dark; background: #090d19; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; background: #090d19; }
+.viewport-wrap { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #0b1020; }
+.viewport-wrap video, .viewport-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
+.viewport-wrap video, .viewport-wrap #landmarks { display: none !important; }
+.viewport-wrap .scene { position: relative; z-index: 2; }
+.scene { width: 100%; height: 100%; }
+.scene canvas { display: block; }
+.start-screen { position: fixed; z-index: 6; inset: 0; display: grid; place-items: center; background: rgba(5, 8, 18, .62); backdrop-filter: blur(8px); }
+.start-screen.hidden { display: none; }
+.controls { position: fixed; z-index: 5; left: 16px; bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+.controls button, .VRButton { padding: 10px 14px; border: 1px solid #393452; border-radius: 3px; color: #c9c2e7; background: rgba(11, 16, 32, .88); font: 11px monospace; cursor: pointer; }
+.controls button:hover, .VRButton:hover { color: #fff; border-color: #8175b8; }
+.calibration { position: fixed; z-index: 5; top: 16px; right: 16px; width: 230px; padding: 14px; display: grid; gap: 9px; color: #c9c2e7; background: rgba(11, 16, 32, .9); border: 1px solid #393452; border-radius: 4px; font: 11px monospace; }
+.calibration strong { color: #72f8dd; font-weight: 500; }
+.calibration label { display: grid; grid-template-columns: 14px 1fr 42px; gap: 6px; align-items: center; }
+.calibration input { width: 100%; accent-color: #72f8dd; }
+.calibration output, .calibration code { color: #fff; font: 10px monospace; }
+.calibration code { padding-top: 4px; border-top: 1px solid #2b2b44; }
+.camera-toggle { border-color: #6ef6da !important; color: #07141a !important; background: #6ef6da !important; }
+.start-button { min-width: 190px; padding: 16px 22px !important; box-shadow: 0 0 34px rgba(110, 246, 218, .2); }
+.camera-toggle:disabled { opacity: .65; cursor: wait; }
+.camera-switch:disabled { opacity: .45; cursor: not-allowed; }
+.cardboard-mode .scene canvas { width: 100%; }
+@media (max-width: 600px) { .calibration { top: 8px; right: 8px; width: 205px; } .controls { left: 8px; right: 8px; bottom: 8px; } .controls button, .VRButton { flex: 1 1 auto; } }

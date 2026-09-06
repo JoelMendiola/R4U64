@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { Hand } from 'kalidokit';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
@@ -218,6 +217,7 @@ const stereoEffect = new StereoEffect(renderer);
 let cardboardMode = false;
 let cardboardOrientationEnabled = false;
 let deviceOrientation;
+let cardboardInitialQuaternion;
 
 function handleDeviceOrientation(event) {
   deviceOrientation = event;
@@ -245,9 +245,15 @@ function updateCardboardOrientation() {
     new THREE.Vector3(0, 0, 1),
     -screenAngle,
   );
-  camera.quaternion.setFromEuler(euler);
-  camera.quaternion.multiply(new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)));
-  camera.quaternion.multiply(screenQuaternion);
+  const orientationQuaternion = new THREE.Quaternion().setFromEuler(euler);
+  orientationQuaternion.multiply(new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)));
+  orientationQuaternion.multiply(screenQuaternion);
+  if (!cardboardInitialQuaternion) {
+    cardboardInitialQuaternion = orientationQuaternion.clone();
+    camera.quaternion.identity();
+    return;
+  }
+  camera.quaternion.copy(cardboardInitialQuaternion).invert().multiply(orientationQuaternion);
 }
 
 function updateCalibrationModel() {
@@ -334,10 +340,11 @@ async function startCamera() {
 
 function setCardboardMode(enabled) {
   cardboardMode = enabled;
-  cardboardToggle.textContent = enabled ? 'Salir de pantalla dividida' : 'Dividir pantalla';
+  cardboardToggle.textContent = enabled ? 'Salir de VR simulada' : 'Entrar en VR simulada';
   document.body.classList.toggle('cardboard-mode', enabled);
   stereoEffect.setSize(sceneHost.clientWidth, sceneHost.clientHeight);
   controls.enabled = !enabled && !xrSessionActive;
+  if (enabled) cardboardInitialQuaternion = null;
   if (enabled) enableCardboardOrientation().catch((error) => console.error('No se pudo activar la orientación:', error));
 }
 
@@ -863,17 +870,12 @@ function updateXRSurface() {
 
 renderer.xr.addEventListener('sessionstart', () => {
   xrSessionActive = true;
-  if (xrSessionMode === 'ar') {
-    simulationStarted = false;
-    simulationRoot.visible = false;
-    reticle.visible = false;
-    hitTestSource = undefined;
-    hitTestSourceRequested = false;
-    requestXRHitTestSource();
-  } else {
-    simulationStarted = true;
-    simulationRoot.visible = true;
-  }
+  simulationStarted = false;
+  simulationRoot.visible = false;
+  reticle.visible = false;
+  hitTestSource = undefined;
+  hitTestSourceRequested = false;
+  requestXRHitTestSource();
   controls.enabled = false;
   cameraPinches.clear();
   grabbedBy.clear();
@@ -893,12 +895,6 @@ renderer.xr.addEventListener('sessionend', () => {
 
 setupInput(0);
 setupInput(1);
-const vrButton = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
-vrButton.classList.add('VRButton');
-vrButton.textContent = 'Entrar en VR';
-vrButton.addEventListener('click', () => { xrSessionMode = 'vr'; });
-controlBar.appendChild(vrButton);
-
 const arButton = ARButton.createButton(renderer, {
   requiredFeatures: ['hit-test', 'local-floor'],
   optionalFeatures: ['plane-detection', 'hand-tracking'],
@@ -907,6 +903,7 @@ arButton.classList.add('ARButton');
 arButton.textContent = 'Entrar en AR';
 arButton.addEventListener('click', () => {
   xrSessionMode = 'ar';
+  if (cardboardMode) setCardboardMode(false);
 });
 controlBar.appendChild(arButton);
 cameraToggle.addEventListener('click', startCamera);

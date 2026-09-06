@@ -210,6 +210,39 @@ renderer.xr.enabled = true;
 sceneHost.appendChild(renderer.domElement);
 const stereoEffect = new StereoEffect(renderer);
 let cardboardMode = false;
+let cardboardOrientationEnabled = false;
+let deviceOrientation;
+
+function handleDeviceOrientation(event) {
+  deviceOrientation = event;
+}
+
+async function enableCardboardOrientation() {
+  if (cardboardOrientationEnabled) return;
+  if (typeof DeviceOrientationEvent === 'undefined') return;
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    const permission = await DeviceOrientationEvent.requestPermission();
+    if (permission !== 'granted') return;
+  }
+  window.addEventListener('deviceorientation', handleDeviceOrientation, true);
+  cardboardOrientationEnabled = true;
+}
+
+function updateCardboardOrientation() {
+  if (!cardboardMode || !deviceOrientation) return;
+  const alpha = THREE.MathUtils.degToRad(deviceOrientation.alpha || 0);
+  const beta = THREE.MathUtils.degToRad(deviceOrientation.beta || 0);
+  const gamma = THREE.MathUtils.degToRad(deviceOrientation.gamma || 0);
+  const screenAngle = THREE.MathUtils.degToRad(window.screen.orientation?.angle || 0);
+  const euler = new THREE.Euler(beta, alpha, -gamma, 'YXZ');
+  const screenQuaternion = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1),
+    -screenAngle,
+  );
+  camera.quaternion.setFromEuler(euler);
+  camera.quaternion.multiply(new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)));
+  camera.quaternion.multiply(screenQuaternion);
+}
 
 function updateCalibrationModel() {
   for (const side of ['Left', 'Right']) {
@@ -291,9 +324,11 @@ async function startCamera() {
 
 function setCardboardMode(enabled) {
   cardboardMode = enabled;
-  cardboardToggle.textContent = enabled ? 'Salir de Cardboard' : 'Dividir pantalla';
+  cardboardToggle.textContent = enabled ? 'Salir de Cardboard' : 'Entrar en Cardboard';
   document.body.classList.toggle('cardboard-mode', enabled);
   stereoEffect.setSize(sceneHost.clientWidth, sceneHost.clientHeight);
+  controls.enabled = !enabled && !xrSessionActive;
+  if (enabled) enableCardboardOrientation().catch((error) => console.error('No se pudo activar la orientación:', error));
 }
 
 async function switchToRearCamera() {
@@ -321,7 +356,11 @@ async function switchCamera() {
 function cameraPoint(landmark, handedness = 'Right') {
   const normalizedX = cameraMirror ? 0.5 - landmark.x : landmark.x - 0.5;
   const point = new THREE.Vector3(normalizedX * 3.1, 2.25 - landmark.y * 2.1, 0.05);
-  if (xrSessionActive && simulationStarted) point.applyMatrix4(simulationRoot.matrix);
+  if (cardboardMode && !xrSessionActive) {
+    point.sub(camera.position).applyQuaternion(camera.quaternion).add(camera.position);
+  } else if (xrSessionActive && simulationStarted) {
+    point.applyMatrix4(simulationRoot.matrix);
+  }
   return point;
 }
 
@@ -679,20 +718,10 @@ function setupInput(index) {
 function getPinchPosition(hand) {
   const indexTip = hand.joints?.['index-finger-tip'];
   const thumbTip = hand.joints?.['thumb-tip'];
-  if (!indexTip || !thumbTip) {
-    hand.getWorldPosition(pinchPoint);
-    const x = pinchPoint.x;
-    pinchPoint.x = pinchPoint.z;
-    pinchPoint.z = x;
-    return pinchPoint;
-  }
+  if (!indexTip || !thumbTip) return hand.getWorldPosition(pinchPoint);
   indexTip.getWorldPosition(handWorldPosition);
   thumbTip.getWorldPosition(pinchPoint);
-  pinchPoint.lerp(handWorldPosition, 0.5);
-  const x = pinchPoint.x;
-  pinchPoint.x = pinchPoint.z;
-  pinchPoint.z = x;
-  return pinchPoint;
+  return pinchPoint.lerp(handWorldPosition, 0.5);
 }
 
 function startGrab(source, point) {
@@ -824,7 +853,7 @@ renderer.xr.addEventListener('sessionend', () => {
   reticle.visible = false;
   simulationRoot.visible = true;
   simulationStarted = true;
-  controls.enabled = true;
+  controls.enabled = !cardboardMode;
   grabbedBy.clear();
 });
 
@@ -834,14 +863,17 @@ const xrButton = ARButton.createButton(renderer, {
   requiredFeatures: ['hit-test', 'local-floor'],
   optionalFeatures: ['plane-detection', 'hand-tracking'],
 });
-xrButton.textContent = 'Enter VR';
+xrButton.textContent = 'Entrar en AR';
 xrButton.addEventListener('click', () => {
   if (!cameraStream) startCamera();
 });
 document.body.appendChild(xrButton);
 cameraToggle.addEventListener('click', startCamera);
 cameraSwitch.addEventListener('click', switchCamera);
-cardboardToggle.addEventListener('click', () => setCardboardMode(!cardboardMode));
+cardboardToggle.addEventListener('click', () => {
+  if (!cardboardMode && !cameraStream) startCamera();
+  setCardboardMode(!cardboardMode);
+});
 
 document.querySelector('#reset').addEventListener('click', () => {
   objects.forEach((object, index) => {
@@ -863,7 +895,8 @@ window.addEventListener('resize', () => {
 
 const handClock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  if (!xrSessionActive) controls.update();
+  if (!xrSessionActive && !cardboardMode) controls.update();
+  updateCardboardOrientation();
   updateCameraHands();
   updateXRSurface();
    const delta = handClock.getDelta();
@@ -873,6 +906,6 @@ renderer.setAnimationLoop(() => {
    for (const object of objects) {
      if (simulationStarted && !object.userData.grabbed) object.rotation.y += 0.0025;
   }
-   if (cardboardMode) stereoEffect.render(scene, camera);
+    if (cardboardMode && !xrSessionActive) stereoEffect.render(scene, camera);
    else renderer.render(scene, camera);
 });

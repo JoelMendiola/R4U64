@@ -320,7 +320,9 @@ async function switchCamera() {
 
 function cameraPoint(landmark, handedness = 'Right') {
   const normalizedX = cameraMirror ? 0.5 - landmark.x : landmark.x - 0.5;
-  return new THREE.Vector3(normalizedX * 3.1, 2.25 - landmark.y * 2.1, 0.05);
+  const point = new THREE.Vector3(normalizedX * 3.1, 2.25 - landmark.y * 2.1, 0.05);
+  if (xrSessionActive && simulationStarted) point.applyMatrix4(simulationRoot.matrix);
+  return point;
 }
 
 function createCameraHandVisual() {
@@ -781,16 +783,17 @@ function updateXRSurface() {
   const referenceSpace = renderer.xr.getReferenceSpace();
   if (!frame || !referenceSpace) return;
 
-  const hit = frame.getHitTestResults(hitTestSource).find((result) => {
+  const hit = frame.getHitTestResults(hitTestSource).map((result) => {
     const pose = result.getPose(referenceSpace);
-    if (!pose) return false;
+    if (!pose) return null;
     const matrix = pose.transform.matrix;
-    return Math.abs(matrix[5]) > 0.85;
-  });
+    const normalY = Math.abs(matrix[5]);
+    if (normalY > 0.85) return { result, pose };
+    return null;
+  }).filter(Boolean)[0];
   if (!hit) return;
 
-  const pose = hit.getPose(referenceSpace);
-  if (!pose) return;
+  const { pose } = hit;
   surfaceMatrix.fromArray(pose.transform.matrix);
   reticle.matrix.copy(surfaceMatrix);
   reticle.visible = true;

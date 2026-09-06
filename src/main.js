@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { Hand } from 'kalidokit';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
@@ -50,6 +50,7 @@ let cameraStream;
 let cameraFacingMode = 'user';
 let cameraMirror = true;
 let lastVideoTime = -1;
+let xrSessionActive = false;
 const cameraPinches = new Map();
 const cameraGrabPoints = new Map();
 const cameraHandVisuals = [];
@@ -160,12 +161,16 @@ function prepareHandTemplate(gltfScene, animations) {
   wrapper.traverse((part) => {
     if (!part.isMesh) return;
     part.material = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
+      color: 0x72f8dd,
       roughness: 0.38,
       metalness: 0.03,
+      emissive: 0x16483f,
+      emissiveIntensity: 0.45,
+      side: THREE.DoubleSide,
     });
     part.castShadow = true;
     part.receiveShadow = true;
+    part.renderOrder = 4;
   });
   return wrapper;
 }
@@ -178,6 +183,20 @@ new GLTFLoader().load(leftHandModelUrl, ({ scene: gltfScene, animations }) => {
 });
 
 const scene = new THREE.Scene();
+const simulationRoot = new THREE.Group();
+simulationRoot.visible = true;
+scene.add(simulationRoot);
+let simulationStarted = true;
+let hitTestSource;
+let hitTestSourceRequested = false;
+const surfaceMatrix = new THREE.Matrix4();
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x72f8dd, transparent: true, opacity: 0.9 }),
+);
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+scene.add(reticle);
 
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
 camera.position.set(0, 1.55, 3.8);
@@ -556,11 +575,11 @@ function updateCameraHands() {
     if (pinching && !cameraPinches.get(source)) startGrab(source, point);
     if (!pinching && cameraPinches.get(source)) endGrab(source);
      cameraPinches.set(source, pinching);
-     const grab = grabbedBy.get(source);
-     if (grab) {
-       const now = performance.now();
-       const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
-       grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
+      const grab = grabbedBy.get(source);
+      if (grab) {
+        const now = performance.now();
+        const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
+        grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
        grab.object.position.copy(point).add(grab.offset);
        grab.lastPoint.copy(point);
        grab.lastTime = now;
@@ -600,13 +619,13 @@ const floor = new THREE.Mesh(
 floor.rotation.x = -Math.PI / 2;
 floor.position.y = 0;
 floor.receiveShadow = true;
-scene.add(floor);
+simulationRoot.add(floor);
 
 const grid = new THREE.GridHelper(6, 24, 0x384065, 0x1c2540);
 grid.position.y = 0.006;
 grid.material.transparent = true;
 grid.material.opacity = 0.42;
-scene.add(grid);
+simulationRoot.add(grid);
 
 function createObject(geometry, material, position, rotation = [0, 0, 0]) {
   const mesh = new THREE.Mesh(geometry, material);
@@ -620,7 +639,7 @@ function createObject(geometry, material, position, rotation = [0, 0, 0]) {
   mesh.userData.velocity = new THREE.Vector3();
   mesh.userData.physicsActive = false;
   mesh.userData.home = { position: mesh.position.clone(), quaternion: mesh.quaternion.clone() };
-  scene.add(mesh);
+  simulationRoot.add(mesh);
   objects.push(mesh);
   initialTransforms.push(mesh.userData.home);
   return mesh;
@@ -658,10 +677,20 @@ function setupInput(index) {
 function getPinchPosition(hand) {
   const indexTip = hand.joints?.['index-finger-tip'];
   const thumbTip = hand.joints?.['thumb-tip'];
-  if (!indexTip || !thumbTip) return hand.getWorldPosition(pinchPoint);
+  if (!indexTip || !thumbTip) {
+    hand.getWorldPosition(pinchPoint);
+    const x = pinchPoint.x;
+    pinchPoint.x = pinchPoint.z;
+    pinchPoint.z = x;
+    return pinchPoint;
+  }
   indexTip.getWorldPosition(handWorldPosition);
   thumbTip.getWorldPosition(pinchPoint);
-  return pinchPoint.lerp(handWorldPosition, 0.5);
+  pinchPoint.lerp(handWorldPosition, 0.5);
+  const x = pinchPoint.x;
+  pinchPoint.x = pinchPoint.z;
+  pinchPoint.z = x;
+  return pinchPoint;
 }
 
 function startGrab(source, point) {
@@ -676,9 +705,9 @@ function startGrab(source, point) {
   }
   if (!nearest) return;
    grabbedBy.set(source, {
-     object: nearest,
-     offset: nearest.position.clone().sub(point),
-     lastPoint: point.clone(),
+      object: nearest,
+      offset: nearest.position.clone().sub(point),
+      lastPoint: point.clone(),
      lastTime: performance.now(),
      velocity: new THREE.Vector3(),
    });
@@ -702,9 +731,9 @@ function endGrab(source) {
 function updateHands() {
   for (const hand of hands) {
     const grab = grabbedBy.get(hand);
-    if (!grab) continue;
-    const point = getPinchPosition(hand);
-     const now = performance.now();
+     if (!grab) continue;
+     const point = getPinchPosition(hand);
+      const now = performance.now();
      const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
      grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
      grab.object.position.copy(point).add(grab.offset);
@@ -715,6 +744,7 @@ function updateHands() {
 }
 
 function updatePhysics(delta) {
+  if (!simulationStarted) return;
   for (const object of objects) {
     if (!object.userData.physicsActive || [...grabbedBy.values()].some((grab) => grab.object === object)) continue;
     const velocity = object.userData.velocity;
@@ -732,17 +762,80 @@ function updatePhysics(delta) {
   }
 }
 
+async function requestXRHitTestSource() {
+  const session = renderer.xr.getSession();
+  if (!session || hitTestSourceRequested) return;
+  hitTestSourceRequested = true;
+  try {
+    const viewerSpace = await session.requestReferenceSpace('viewer');
+    hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+  } catch (error) {
+    hitTestSourceRequested = false;
+    console.error('No se pudo iniciar la detección de superficies:', error);
+  }
+}
+
+function updateXRSurface() {
+  if (!xrSessionActive || !hitTestSource || simulationStarted) return;
+  const frame = renderer.xr.getFrame();
+  const referenceSpace = renderer.xr.getReferenceSpace();
+  if (!frame || !referenceSpace) return;
+
+  const hit = frame.getHitTestResults(hitTestSource).find((result) => {
+    const pose = result.getPose(referenceSpace);
+    if (!pose) return false;
+    const matrix = pose.transform.matrix;
+    return Math.abs(matrix[5]) > 0.85;
+  });
+  if (!hit) return;
+
+  const pose = hit.getPose(referenceSpace);
+  if (!pose) return;
+  surfaceMatrix.fromArray(pose.transform.matrix);
+  reticle.matrix.copy(surfaceMatrix);
+  reticle.visible = true;
+
+  simulationRoot.matrix.copy(surfaceMatrix);
+  simulationRoot.matrix.decompose(simulationRoot.position, simulationRoot.quaternion, simulationRoot.scale);
+  simulationRoot.visible = true;
+  simulationStarted = true;
+}
+
 renderer.xr.addEventListener('sessionstart', () => {
+  xrSessionActive = true;
+  simulationStarted = false;
+  simulationRoot.visible = false;
+  reticle.visible = false;
+  hitTestSource = undefined;
+  hitTestSourceRequested = false;
+  requestXRHitTestSource();
   controls.enabled = false;
+  cameraPinches.clear();
+  grabbedBy.clear();
 });
 renderer.xr.addEventListener('sessionend', () => {
+  xrSessionActive = false;
+  hitTestSource?.cancel();
+  hitTestSource = undefined;
+  hitTestSourceRequested = false;
+  reticle.visible = false;
+  simulationRoot.visible = true;
+  simulationStarted = true;
   controls.enabled = true;
   grabbedBy.clear();
 });
 
 setupInput(0);
 setupInput(1);
-document.body.appendChild(VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] }));
+const xrButton = ARButton.createButton(renderer, {
+  requiredFeatures: ['hit-test', 'local-floor'],
+  optionalFeatures: ['plane-detection', 'hand-tracking'],
+});
+xrButton.textContent = 'Enter VR';
+xrButton.addEventListener('click', () => {
+  if (!cameraStream) startCamera();
+});
+document.body.appendChild(xrButton);
 cameraToggle.addEventListener('click', startCamera);
 cameraSwitch.addEventListener('click', switchCamera);
 cardboardToggle.addEventListener('click', () => setCardboardMode(!cardboardMode));
@@ -767,14 +860,15 @@ window.addEventListener('resize', () => {
 
 const handClock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  controls.update();
+  if (!xrSessionActive) controls.update();
   updateCameraHands();
+  updateXRSurface();
    const delta = handClock.getDelta();
    handMixers.forEach((mixer) => mixer.update(delta));
    updatePhysics(delta);
   updateHands();
-  for (const object of objects) {
-    if (!object.userData.grabbed) object.rotation.y += 0.0025;
+   for (const object of objects) {
+     if (simulationStarted && !object.userData.grabbed) object.rotation.y += 0.0025;
   }
    if (cardboardMode) stereoEffect.render(scene, camera);
    else renderer.render(scene, camera);

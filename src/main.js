@@ -896,7 +896,10 @@ setupInput(1);
 const vrButton = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
 vrButton.classList.add('VRButton');
 vrButton.textContent = 'Entrar en VR';
-vrButton.addEventListener('click', () => { xrSessionMode = 'vr'; });
+vrButton.addEventListener('click', () => {
+  xrSessionMode = 'vr';
+  if (!cameraStream) startCamera();
+});
 controlBar.appendChild(vrButton);
 
 const arButton = ARButton.createButton(renderer, {

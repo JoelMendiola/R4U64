@@ -863,6 +863,11 @@ function updateXRSurface() {
 
 renderer.xr.addEventListener('sessionstart', () => {
   xrSessionActive = true;
+  if (xrSessionMode === 'vr' && cardboardMode) {
+    cardboardMode = false;
+    document.body.classList.remove('cardboard-mode');
+    cardboardToggle.textContent = 'Dividir pantalla';
+  }
   if (xrSessionMode === 'ar') {
     simulationStarted = false;
     simulationRoot.visible = false;
@@ -893,11 +898,12 @@ renderer.xr.addEventListener('sessionend', () => {
 
 setupInput(0);
 setupInput(1);
-const vrButton = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
+const vrButton = VRButton.createButton(renderer, { requiredFeatures: ['hand-tracking'] });
 vrButton.classList.add('VRButton');
 vrButton.textContent = 'Entrar en VR';
 vrButton.addEventListener('click', () => {
   xrSessionMode = 'vr';
+  if (cardboardMode) setCardboardMode(false);
   if (!cameraStream) startCamera();
 });
 controlBar.appendChild(vrButton);

@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { Hand } from 'kalidokit';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
@@ -18,6 +19,7 @@ const landmarkCanvas = document.querySelector('#landmarks');
 const cameraToggle = document.querySelector('#camera-toggle');
 const cameraSwitch = document.querySelector('#camera-switch');
 const cardboardToggle = document.querySelector('#cardboard-toggle');
+const controlBar = document.querySelector('.controls');
 const startScreen = document.querySelector('#start-screen');
 const calibration = document.querySelector('#calibration');
 const rotationInputs = {
@@ -47,6 +49,7 @@ const grabbedBy = new Map();
 const initialTransforms = [];
 let handLandmarker;
 let cameraStream;
+let cameraStarting = false;
 let cameraFacingMode = 'user';
 let cameraMirror = true;
 let lastVideoTime = -1;
@@ -167,6 +170,8 @@ function prepareHandTemplate(gltfScene, animations) {
       emissive: 0x16483f,
       emissiveIntensity: 0.45,
       side: THREE.DoubleSide,
+      depthTest: false,
+      depthWrite: false,
     });
     part.castShadow = true;
     part.receiveShadow = true;
@@ -189,6 +194,7 @@ scene.add(simulationRoot);
 let simulationStarted = true;
 let hitTestSource;
 let hitTestSourceRequested = false;
+let xrSessionMode;
 const surfaceMatrix = new THREE.Matrix4();
 const reticle = new THREE.Mesh(
   new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
@@ -263,12 +269,14 @@ Object.values(rotationInputs).flat().forEach((input) => input.addEventListener('
 Object.values(positionInputs).forEach((input) => input.addEventListener('input', updateCalibrationModel));
 
 async function startCamera() {
+  if (cameraStarting || (xrSessionActive && xrSessionMode === 'ar')) return;
   if (!navigator.mediaDevices?.getUserMedia) {
     return;
   }
   if (!window.isSecureContext) {
     return;
   }
+  cameraStarting = true;
   cameraToggle.disabled = true;
   cameraSwitch.disabled = true;
   try {
@@ -305,6 +313,7 @@ async function startCamera() {
       ? 'Cambiar a cámara trasera'
       : 'Cambiar a cámara frontal';
     cameraToggle.textContent = 'Cámara activa';
+    cameraStarting = false;
   } catch (error) {
     cameraStream?.getTracks().forEach((track) => track.stop());
     cameraStream = undefined;
@@ -318,13 +327,14 @@ async function startCamera() {
       SecurityError: 'El navegador bloqueó el acceso a la cámara',
     };
     cameraToggle.textContent = cameraErrors[error.name] || 'Activar cámara';
+    cameraStarting = false;
     console.error(error);
   }
 }
 
 function setCardboardMode(enabled) {
   cardboardMode = enabled;
-  cardboardToggle.textContent = enabled ? 'Salir de Cardboard' : 'Entrar en Cardboard';
+  cardboardToggle.textContent = enabled ? 'Salir de pantalla dividida' : 'Dividir pantalla';
   document.body.classList.toggle('cardboard-mode', enabled);
   stereoEffect.setSize(sceneHost.clientWidth, sceneHost.clientHeight);
   controls.enabled = !enabled && !xrSessionActive;
@@ -375,7 +385,13 @@ function createCameraHandVisual() {
       depthTest: false,
     });
    const boneMaterial = new THREE.LineBasicMaterial({ color: 0x72f8dd, transparent: true, opacity: 0.9, depthTest: false });
-   const palmMaterial = new THREE.MeshStandardMaterial({ color: 0x72f8dd, roughness: 0.35, metalness: 0.05 });
+    const palmMaterial = new THREE.MeshStandardMaterial({
+      color: 0x72f8dd,
+      roughness: 0.35,
+      metalness: 0.05,
+      depthTest: false,
+      depthWrite: false,
+    });
    group.userData.joints = Array.from({ length: 21 }, () => {
       const joint = new THREE.Mesh(new THREE.SphereGeometry(0.02, 10, 8), jointMaterial);
     group.add(joint);
@@ -412,7 +428,8 @@ function createCameraHandVisual() {
      });
    group.userData.palm = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), palmMaterial);
     group.add(group.userData.palm);
-   group.visible = false;
+    group.renderOrder = 10;
+    group.visible = false;
   scene.add(group);
   cameraHandVisuals.push(group);
   return group;
@@ -709,6 +726,17 @@ function setupInput(index) {
   const hand = renderer.xr.getHand(index);
   hand.userData.handedness = index === 0 ? 'left' : 'right';
   hand.add(handFactory.createHandModel(hand, 'mesh'));
+  hand.traverse((part) => {
+    if (!part.isMesh && !part.isSkinnedMesh) return;
+    part.renderOrder = 10;
+    const materials = Array.isArray(part.material) ? part.material : [part.material];
+    materials.forEach((material) => {
+      if (!material) return;
+      material.depthTest = false;
+      material.depthWrite = false;
+      material.needsUpdate = true;
+    });
+  });
   hand.addEventListener('pinchstart', (event) => startGrab(event.target, getPinchPosition(event.target)));
   hand.addEventListener('pinchend', (event) => endGrab(event.target));
   hands.push(hand);
@@ -807,7 +835,7 @@ async function requestXRHitTestSource() {
 }
 
 function updateXRSurface() {
-  if (!xrSessionActive || !hitTestSource || simulationStarted) return;
+  if (xrSessionMode !== 'ar' || !xrSessionActive || !hitTestSource || simulationStarted) return;
   const frame = renderer.xr.getFrame();
   const referenceSpace = renderer.xr.getReferenceSpace();
   if (!frame || !referenceSpace) return;
@@ -835,12 +863,17 @@ function updateXRSurface() {
 
 renderer.xr.addEventListener('sessionstart', () => {
   xrSessionActive = true;
-  simulationStarted = false;
-  simulationRoot.visible = false;
-  reticle.visible = false;
-  hitTestSource = undefined;
-  hitTestSourceRequested = false;
-  requestXRHitTestSource();
+  if (xrSessionMode === 'ar') {
+    simulationStarted = false;
+    simulationRoot.visible = false;
+    reticle.visible = false;
+    hitTestSource = undefined;
+    hitTestSourceRequested = false;
+    requestXRHitTestSource();
+  } else {
+    simulationStarted = true;
+    simulationRoot.visible = true;
+  }
   controls.enabled = false;
   cameraPinches.clear();
   grabbedBy.clear();
@@ -855,19 +888,27 @@ renderer.xr.addEventListener('sessionend', () => {
   simulationStarted = true;
   controls.enabled = !cardboardMode;
   grabbedBy.clear();
+  xrSessionMode = undefined;
 });
 
 setupInput(0);
 setupInput(1);
-const xrButton = ARButton.createButton(renderer, {
+const vrButton = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
+vrButton.classList.add('VRButton');
+vrButton.textContent = 'Entrar en VR';
+vrButton.addEventListener('click', () => { xrSessionMode = 'vr'; });
+controlBar.appendChild(vrButton);
+
+const arButton = ARButton.createButton(renderer, {
   requiredFeatures: ['hit-test', 'local-floor'],
   optionalFeatures: ['plane-detection', 'hand-tracking'],
 });
-xrButton.textContent = 'Entrar en AR';
-xrButton.addEventListener('click', () => {
-  if (!cameraStream) startCamera();
+arButton.classList.add('ARButton');
+arButton.textContent = 'Entrar en AR';
+arButton.addEventListener('click', () => {
+  xrSessionMode = 'ar';
 });
-document.body.appendChild(xrButton);
+controlBar.appendChild(arButton);
 cameraToggle.addEventListener('click', startCamera);
 cameraSwitch.addEventListener('click', switchCamera);
 cardboardToggle.addEventListener('click', () => {

@@ -149,11 +149,13 @@ async function switchCamera() {
 function cameraPoint(landmark, handedness = 'Right', handDepth = 0) {
   const normalizedX = cameraMirror ? 0.5 - landmark.x : landmark.x - 0.5;
   const landmarkDepth = -(landmark.z || 0) * CAMERA_LANDMARK_DEPTH_SCALE;
-  return new THREE.Vector3(
+  const point = new THREE.Vector3(
     normalizedX * 3.1,
     2.25 - landmark.y * 2.1,
-    0.05 + handDepth + landmarkDepth,
+    renderer.xr.isPresenting ? -0.9 + handDepth + landmarkDepth : 0.05 + handDepth + landmarkDepth,
   );
+  if (renderer.xr.isPresenting) renderer.xr.getCamera(camera).localToWorld(point);
+  return point;
 }
 
 function cameraHandDepth(landmarks) {
@@ -292,7 +294,9 @@ function updateCameraHands() {
        const now = performance.now();
        const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
        grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
-       grab.object.position.copy(point).add(grab.offset);
+        handWorldPosition.copy(point).add(grab.offset);
+        if (grab.object.parent) grab.object.parent.worldToLocal(handWorldPosition);
+        grab.object.position.copy(handWorldPosition);
        grab.lastPoint.copy(point);
        grab.lastTime = now;
      }
@@ -379,7 +383,9 @@ function setupInput(index) {
 
   const hand = renderer.xr.getHand(index);
   hand.userData.handedness = index === 0 ? 'left' : 'right';
-  hand.add(handFactory.createHandModel(hand, 'mesh'));
+  // Usa las articulaciones WebXR directamente para evitar una orientación
+  // adicional del modelo de mano.
+  hand.add(handFactory.createHandModel(hand, 'spheres'));
   hand.addEventListener('pinchstart', (event) => startGrab(event.target, getPinchPosition(event.target)));
   hand.addEventListener('pinchend', (event) => endGrab(event.target));
   hands.push(hand);
@@ -406,9 +412,10 @@ function startGrab(source, point) {
     }
   }
   if (!nearest) return;
+  nearest.getWorldPosition(handWorldPosition);
    grabbedBy.set(source, {
      object: nearest,
-     offset: nearest.position.clone().sub(point),
+     offset: handWorldPosition.clone().sub(point),
      lastPoint: point.clone(),
      lastTime: performance.now(),
      velocity: new THREE.Vector3(),
@@ -438,7 +445,9 @@ function updateHands() {
      const now = performance.now();
      const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
      grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
-     grab.object.position.copy(point).add(grab.offset);
+      handWorldPosition.copy(point).add(grab.offset);
+      if (grab.object.parent) grab.object.parent.worldToLocal(handWorldPosition);
+      grab.object.position.copy(handWorldPosition);
      grab.lastPoint.copy(point);
      grab.lastTime = now;
      grab.object.rotation.y += 0.012;

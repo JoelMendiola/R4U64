@@ -4,6 +4,7 @@ body { margin: 0; min-width: 320px; min-height: 100vh; overflow: hidden; backgro
 .viewport-wrap { position: relative; width: 100vw; height: 100vh; overflow: hidden; background: #0b1020; }
 .viewport-wrap video, .viewport-wrap canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 .viewport-wrap video, .viewport-wrap #landmarks { display: none !important; }
+.viewport-wrap video.visible, .viewport-wrap #landmarks.visible { display: block !important; }
 .viewport-wrap .scene { position: relative; z-index: 2; }
 .scene { width: 100%; height: 100%; }
 .scene canvas { display: block; }

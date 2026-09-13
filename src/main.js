@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { FilesetResolver, HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
+import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
@@ -13,6 +14,7 @@ const landmarkCanvas = document.querySelector('#landmarks');
 const cameraToggle = document.querySelector('#camera-toggle');
 const cameraSwitch = document.querySelector('#camera-switch');
 const cardboardToggle = document.querySelector('#cardboard-toggle');
+const controlBar = document.querySelector('.controls');
 const startScreen = document.querySelector('#start-screen');
 const landmarkContext = landmarkCanvas.getContext('2d');
 const objects = [];
@@ -22,9 +24,11 @@ const initialTransforms = [];
 let handLandmarker;
 let poseLandmarker;
 let cameraStream;
+let cameraStarting = false;
 let cameraFacingMode = 'user';
 let cameraMirror = true;
 let lastVideoTime = -1;
+let xrSessionActive = false;
 const cameraPinches = new Map();
 const cameraHandVisuals = [];
 const CAMERA_HAND_REFERENCE_SIZE = 0.2;
@@ -52,6 +56,21 @@ const handWorldPosition = new THREE.Vector3();
 const poseWorldPoint = new THREE.Vector3();
 
 const scene = new THREE.Scene();
+const simulationRoot = new THREE.Group();
+simulationRoot.visible = true;
+scene.add(simulationRoot);
+let simulationStarted = true;
+let hitTestSource;
+let hitTestSourceRequested = false;
+let xrSessionMode;
+const surfaceMatrix = new THREE.Matrix4();
+const reticle = new THREE.Mesh(
+  new THREE.RingGeometry(0.12, 0.16, 32).rotateX(-Math.PI / 2),
+  new THREE.MeshBasicMaterial({ color: 0x72f8dd, transparent: true, opacity: 0.9 }),
+);
+reticle.matrixAutoUpdate = false;
+reticle.visible = false;
+scene.add(reticle);
 
 const camera = new THREE.PerspectiveCamera(50, 1, 0.1, 100);
 camera.position.set(0, 1.55, 3.8);
@@ -66,14 +85,49 @@ renderer.xr.setReferenceSpaceType('local-floor');
 sceneHost.appendChild(renderer.domElement);
 const stereoEffect = new StereoEffect(renderer);
 let cardboardMode = false;
+let cardboardOrientationEnabled = false;
+let deviceOrientation;
+
+function handleDeviceOrientation(event) {
+  deviceOrientation = event;
+}
+
+async function enableCardboardOrientation() {
+  if (cardboardOrientationEnabled) return;
+  if (typeof DeviceOrientationEvent === 'undefined') return;
+  if (typeof DeviceOrientationEvent.requestPermission === 'function') {
+    const permission = await DeviceOrientationEvent.requestPermission();
+    if (permission !== 'granted') return;
+  }
+  window.addEventListener('deviceorientation', handleDeviceOrientation, true);
+  cardboardOrientationEnabled = true;
+}
+
+function updateCardboardOrientation() {
+  if (!cardboardMode || !deviceOrientation) return;
+  const alpha = THREE.MathUtils.degToRad(deviceOrientation.alpha || 0);
+  const beta = THREE.MathUtils.degToRad(deviceOrientation.beta || 0);
+  const gamma = THREE.MathUtils.degToRad(deviceOrientation.gamma || 0);
+  const screenAngle = THREE.MathUtils.degToRad(window.screen.orientation?.angle || 0);
+  const euler = new THREE.Euler(beta, alpha, -gamma, 'YXZ');
+  const screenQuaternion = new THREE.Quaternion().setFromAxisAngle(
+    new THREE.Vector3(0, 0, 1),
+    -screenAngle,
+  );
+  camera.quaternion.setFromEuler(euler);
+  camera.quaternion.multiply(new THREE.Quaternion(-Math.sqrt(0.5), 0, 0, Math.sqrt(0.5)));
+  camera.quaternion.multiply(screenQuaternion);
+}
 
 async function startCamera() {
+  if (cameraStarting || (xrSessionActive && xrSessionMode === 'ar')) return;
   if (!navigator.mediaDevices?.getUserMedia) {
     return;
   }
   if (!window.isSecureContext) {
     return;
   }
+  cameraStarting = true;
   cameraToggle.disabled = true;
   cameraSwitch.disabled = true;
   try {
@@ -121,6 +175,7 @@ async function startCamera() {
       ? 'Cambiar a cámara trasera'
       : 'Cambiar a cámara frontal';
     cameraToggle.textContent = 'Cámara activa';
+    cameraStarting = false;
   } catch (error) {
     cameraStream?.getTracks().forEach((track) => track.stop());
     cameraStream = undefined;
@@ -134,15 +189,18 @@ async function startCamera() {
       SecurityError: 'El navegador bloqueó el acceso a la cámara',
     };
     cameraToggle.textContent = cameraErrors[error.name] || 'Activar cámara';
+    cameraStarting = false;
     console.error(error);
   }
 }
 
 function setCardboardMode(enabled) {
   cardboardMode = enabled;
-  cardboardToggle.textContent = enabled ? 'Salir de Cardboard' : 'Dividir pantalla';
+  cardboardToggle.textContent = enabled ? 'Salir de pantalla dividida' : 'Dividir pantalla';
   document.body.classList.toggle('cardboard-mode', enabled);
   stereoEffect.setSize(sceneHost.clientWidth, sceneHost.clientHeight);
+  controls.enabled = !enabled && !xrSessionActive;
+  if (enabled) enableCardboardOrientation().catch((error) => console.error('No se pudo activar la orientación:', error));
 }
 
 async function switchToRearCamera() {
@@ -257,7 +315,13 @@ function createCameraHandVisual() {
       depthTest: false,
     });
    const boneMaterial = new THREE.LineBasicMaterial({ color: 0x72f8dd, transparent: true, opacity: 0.9, depthTest: false });
-   const palmMaterial = new THREE.MeshStandardMaterial({ color: 0x72f8dd, roughness: 0.35, metalness: 0.05 });
+    const palmMaterial = new THREE.MeshStandardMaterial({
+      color: 0x72f8dd,
+      roughness: 0.35,
+      metalness: 0.05,
+      depthTest: false,
+      depthWrite: false,
+    });
    group.userData.joints = Array.from({ length: 21 }, () => {
       const joint = new THREE.Mesh(new THREE.SphereGeometry(0.02, 10, 8), jointMaterial);
     group.add(joint);
@@ -294,7 +358,8 @@ function createCameraHandVisual() {
      });
    group.userData.palm = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), palmMaterial);
     group.add(group.userData.palm);
-   group.visible = false;
+    group.renderOrder = 10;
+    group.visible = false;
   scene.add(group);
   cameraHandVisuals.push(group);
   return group;
@@ -447,13 +512,13 @@ const floor = new THREE.Mesh(
 floor.rotation.x = -Math.PI / 2;
 floor.position.y = 0;
 floor.receiveShadow = true;
-scene.add(floor);
+simulationRoot.add(floor);
 
 const grid = new THREE.GridHelper(6, 24, 0x384065, 0x1c2540);
 grid.position.y = 0.006;
 grid.material.transparent = true;
 grid.material.opacity = 0.42;
-scene.add(grid);
+simulationRoot.add(grid);
 
 function createObject(geometry, material, position, rotation = [0, 0, 0]) {
   const mesh = new THREE.Mesh(geometry, material);
@@ -467,7 +532,7 @@ function createObject(geometry, material, position, rotation = [0, 0, 0]) {
   mesh.userData.velocity = new THREE.Vector3();
   mesh.userData.physicsActive = false;
   mesh.userData.home = { position: mesh.position.clone(), quaternion: mesh.quaternion.clone() };
-  scene.add(mesh);
+  simulationRoot.add(mesh);
   objects.push(mesh);
   initialTransforms.push(mesh.userData.home);
   return mesh;
@@ -552,9 +617,9 @@ function endGrab(source) {
 function updateHands() {
   for (const hand of hands) {
     const grab = grabbedBy.get(hand);
-    if (!grab) continue;
-    const point = getPinchPosition(hand);
-     const now = performance.now();
+     if (!grab) continue;
+     const point = getPinchPosition(hand);
+      const now = performance.now();
      const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
      grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
       handWorldPosition.copy(point).add(grab.offset);
@@ -567,6 +632,7 @@ function updateHands() {
 }
 
 function updatePhysics(delta) {
+  if (!simulationStarted) return;
   for (const object of objects) {
     if (!object.userData.physicsActive || [...grabbedBy.values()].some((grab) => grab.object === object)) continue;
     const velocity = object.userData.velocity;
@@ -598,13 +664,32 @@ function applySceneLayout(immersive) {
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
+  xrSessionActive = true;
+  if (xrSessionMode === 'ar') {
+    simulationStarted = false;
+    simulationRoot.visible = false;
+    reticle.visible = false;
+    hitTestSource = undefined;
+    hitTestSourceRequested = false;
+    requestXRHitTestSource();
+  } else {
+    simulationStarted = true;
+    simulationRoot.visible = true;
+  }
   controls.enabled = false;
   applySceneLayout(true);
   cameraPinches.clear();
   cameraHandVisuals.forEach((visual) => { visual.visible = false; });
 });
 renderer.xr.addEventListener('sessionend', () => {
-  controls.enabled = true;
+  xrSessionActive = false;
+  hitTestSource?.cancel();
+  hitTestSource = undefined;
+  hitTestSourceRequested = false;
+  reticle.visible = false;
+  simulationRoot.visible = true;
+  simulationStarted = true;
+  controls.enabled = !cardboardMode;
   grabbedBy.clear();
   poseVisual.visible = false;
   applySceneLayout(false);
@@ -617,7 +702,10 @@ document.body.appendChild(VRButton.createButton(renderer, {
 }));
 cameraToggle.addEventListener('click', startCamera);
 cameraSwitch.addEventListener('click', switchCamera);
-cardboardToggle.addEventListener('click', () => setCardboardMode(!cardboardMode));
+cardboardToggle.addEventListener('click', () => {
+  if (!cardboardMode && !cameraStream) startCamera();
+  setCardboardMode(!cardboardMode);
+});
 
 document.querySelector('#reset').addEventListener('click', () => {
   applySceneLayout(renderer.xr.isPresenting);
@@ -633,14 +721,16 @@ window.addEventListener('resize', () => {
 
 const handClock = new THREE.Clock();
 renderer.setAnimationLoop(() => {
-  controls.update();
+  if (!xrSessionActive && !cardboardMode) controls.update();
+  updateCardboardOrientation();
   updateCameraHands();
+  updateXRSurface();
    const delta = handClock.getDelta();
     updatePhysics(delta);
   updateHands();
-  for (const object of objects) {
-    if (!object.userData.grabbed) object.rotation.y += 0.0025;
+   for (const object of objects) {
+     if (simulationStarted && !object.userData.grabbed) object.rotation.y += 0.0025;
   }
-   if (cardboardMode) stereoEffect.render(scene, camera);
+    if (cardboardMode && !xrSessionActive) stereoEffect.render(scene, camera);
    else renderer.render(scene, camera);
 });

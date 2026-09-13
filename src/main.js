@@ -1,16 +1,11 @@
 import * as THREE from 'three';
 import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
-import { Hand } from 'kalidokit';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { ARButton } from 'three/addons/webxr/ARButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
 import { XRHandModelFactory } from 'three/addons/webxr/XRHandModelFactory.js';
 import { StereoEffect } from 'three/addons/effects/StereoEffect.js';
-import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
-import rightHandModelUrl from '../hand-rigged-r.glb';
-import leftHandModelUrl from '../hand-rigged-l.glb';
 import './style.css';
 
 const sceneHost = document.querySelector('#scene');
@@ -21,27 +16,6 @@ const cameraSwitch = document.querySelector('#camera-switch');
 const cardboardToggle = document.querySelector('#cardboard-toggle');
 const controlBar = document.querySelector('.controls');
 const startScreen = document.querySelector('#start-screen');
-const calibration = document.querySelector('#calibration');
-const rotationInputs = {
-  Left: ['x', 'y', 'z'].map((axis) => document.querySelector(`#rotation-left-${axis}`)),
-  Right: ['x', 'y', 'z'].map((axis) => document.querySelector(`#rotation-right-${axis}`)),
-};
-const rotationValues = {
-  Left: ['x', 'y', 'z'].map((axis) => document.querySelector(`#rotation-left-${axis}-value`)),
-  Right: ['x', 'y', 'z'].map((axis) => document.querySelector(`#rotation-right-${axis}-value`)),
-};
-const rotationCoordinates = {
-  Left: document.querySelector('#rotation-left-coordinates'),
-  Right: document.querySelector('#rotation-right-coordinates'),
-};
-const positionInputs = {
-  Left: document.querySelector('#position-left'),
-  Right: document.querySelector('#position-right'),
-};
-const positionValues = {
-  Left: document.querySelector('#position-left-value'),
-  Right: document.querySelector('#position-right-value'),
-};
 const landmarkContext = landmarkCanvas.getContext('2d');
 const objects = [];
 const hands = [];
@@ -55,34 +29,13 @@ let cameraMirror = true;
 let lastVideoTime = -1;
 let xrSessionActive = false;
 const cameraPinches = new Map();
-const cameraGrabPoints = new Map();
 const cameraHandVisuals = [];
-const handModelTemplates = { Left: null, Right: null };
-const modelAnimations = new WeakMap();
-const handMixers = [];
-let calibrationModel;
-let leftCalibrationModel;
-const HAND_MODEL_SCALE = 1.15;
-const HAND_MODEL_TILT = 0.50;
-const HAND_MODEL_X_OFFSET = 0;
-const HAND_MODEL_Y_OFFSET = 0;
-const HAND_MODEL_Z_OFFSET = 0;
-const HAND_MODEL_ROTATIONS = {
-  Left: [9, 34, 0],
-  Right: [-16, -16, 0],
-};
-const LANDMARK_Y_ROTATION_LIMIT = THREE.MathUtils.degToRad(10);
-const LANDMARK_RIG_MAP = {
-  0: 'radius_ulna', 1: 'thumb_trapez', 2: 'thumb_meta', 3: 'thumb_prox', 4: 'thumb_dist',
-  5: 'index_meta', 6: 'index_prox', 7: 'index_midd', 8: 'index_dist',
-  9: 'midd_meta', 10: 'midd_prox', 11: 'midd_midd', 12: 'midd_dist',
-  13: 'ring_meta', 14: 'ring_prox', 15: 'ring_midd', 16: 'ring_dist',
-  17: 'pinky_prox', 18: 'pinky_prox', 19: 'pinky_midd', 20: 'pinky_dist',
-};
-let interactiveHand;
-let handGrabbed = false;
-const handGrabOffset = new THREE.Vector3();
+const CAMERA_HAND_REFERENCE_SIZE = 0.2;
+const CAMERA_HAND_DEPTH_SCALE = 3;
+const CAMERA_HAND_DEPTH_LIMIT = 0.65;
+const CAMERA_LANDMARK_DEPTH_SCALE = 1.5;
 const MEDIAPIPE_VERSION = '0.10.35';
+const XR_OBJECT_DISTANCE = 1.35;
 const handConnections = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],
@@ -93,99 +46,6 @@ const handConnections = [
 ];
 const pinchPoint = new THREE.Vector3();
 const handWorldPosition = new THREE.Vector3();
-
-function attachHandModel(group, source) {
-  group.userData.model = SkeletonUtils.clone(source);
-  group.userData.model.frustumCulled = false;
-  group.userData.model.traverse((part) => {
-    if (part.isMesh || part.isSkinnedMesh) part.frustumCulled = false;
-  });
-  group.userData.rigBones = [];
-  const thumbOffsets = { trapez: 0, meta: 1, prox: 2, dist: 3 };
-  const fingerOffsets = { meta: 0, prox: 1, midd: 2, dist: 3 };
-  group.userData.model.traverse((part) => {
-    if (!part.isBone) return;
-    const name = part.name.toLowerCase().replace(/[^a-z0-9]/g, '');
-    const target = name.match(/^(thumb|index|midd|middle|ring|pinky|little)(trapez|meta|prox|midd|dist)$/);
-    if (!target) return;
-    const finger = ['thumb', 'index', 'midd', 'middle', 'ring', 'pinky', 'little'].indexOf(target[1]);
-    if (finger < 0) return;
-    const offset = (finger === 0 ? thumbOffsets : fingerOffsets)[target[2]];
-    if (offset === undefined) return;
-    const base = finger === 0 ? 0 : 5 + (finger - 1) * 4;
-    group.userData.rigBones.push({ bone: part, start: base + offset, end: base + offset + 1 });
-  });
-  group.add(group.userData.model);
-  const animations = modelAnimations.get(source) || [];
-  group.userData.mixer = new THREE.AnimationMixer(group.userData.model);
-  group.userData.poseAction = animations.length
-    ? group.userData.mixer.clipAction(animations.find((clip) => clip.name === 'Pose_OK') || animations[0])
-    : null;
-  if (group.userData.poseAction) {
-    group.userData.poseAction.setLoop(THREE.LoopOnce, 1);
-    group.userData.poseAction.clampWhenFinished = true;
-  }
-  handMixers.push(group.userData.mixer);
-  group.userData.model.updateMatrixWorld(true);
-  group.userData.rigBones.forEach((entry) => {
-    entry.restLocalQuaternion = entry.bone.quaternion.clone();
-    entry.restQuaternion = entry.bone.getWorldQuaternion(new THREE.Quaternion());
-    const child = entry.bone.children.find((part) => part.isBone);
-    entry.restDirection = child
-      ? child.getWorldPosition(new THREE.Vector3()).sub(entry.bone.getWorldPosition(new THREE.Vector3()))
-      : new THREE.Vector3();
-  });
-  const rootBone = group.userData.model.getObjectByName('radius_ulna');
-  group.userData.rootRestPosition = rootBone?.getWorldPosition(new THREE.Vector3()) || new THREE.Vector3();
-  group.userData.joints.forEach((joint) => { joint.visible = true; });
-  group.userData.bones.forEach((bone) => { bone.visible = true; });
-}
-
-function prepareHandTemplate(gltfScene, animations) {
-  let hasMesh = false;
-  gltfScene.traverse((part) => { if (part.isMesh || part.isSkinnedMesh) hasMesh = true; });
-  if (!hasMesh) {
-    return null;
-  }
-  // Normalizamos una sola vez: contenido escalado a ~1 unidad y centrado en el origen.
-  const bounds = new THREE.Box3().setFromObject(gltfScene);
-  const size = bounds.getSize(new THREE.Vector3());
-  const center = bounds.getCenter(new THREE.Vector3());
-  const innerScale = 1 / Math.max(size.x, size.y, size.z);
-  // world = position + scale * v  →  para centrar: position = -scale * center
-  gltfScene.scale.setScalar(innerScale);
-  gltfScene.position.copy(center).multiplyScalar(-innerScale);
-
-  const wrapper = new THREE.Group();
-  wrapper.add(gltfScene);
-  modelAnimations.set(wrapper, animations);
-  wrapper.add(new THREE.AxesHelper(0.7));
-  wrapper.userData.normalizedSize = 1;
-  wrapper.traverse((part) => {
-    if (!part.isMesh) return;
-    part.material = new THREE.MeshStandardMaterial({
-      color: 0x72f8dd,
-      roughness: 0.38,
-      metalness: 0.03,
-      emissive: 0x16483f,
-      emissiveIntensity: 0.45,
-      side: THREE.DoubleSide,
-      depthTest: false,
-      depthWrite: false,
-    });
-    part.castShadow = true;
-    part.receiveShadow = true;
-    part.renderOrder = 4;
-  });
-  return wrapper;
-}
-
-new GLTFLoader().load(rightHandModelUrl, ({ scene: gltfScene, animations }) => {
-  handModelTemplates.Right = prepareHandTemplate(gltfScene, animations);
-});
-new GLTFLoader().load(leftHandModelUrl, ({ scene: gltfScene, animations }) => {
-  handModelTemplates.Left = prepareHandTemplate(gltfScene, animations);
-});
 
 const scene = new THREE.Scene();
 const simulationRoot = new THREE.Group();
@@ -213,6 +73,7 @@ renderer.setSize(sceneHost.clientWidth, sceneHost.clientHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 renderer.xr.enabled = true;
+renderer.xr.setReferenceSpaceType('local');
 sceneHost.appendChild(renderer.domElement);
 const stereoEffect = new StereoEffect(renderer);
 let cardboardMode = false;
@@ -250,24 +111,6 @@ function updateCardboardOrientation() {
   camera.quaternion.multiply(screenQuaternion);
 }
 
-function updateCalibrationModel() {
-  for (const side of ['Left', 'Right']) {
-    const degrees = rotationInputs[side].map((input) => Number(input.value));
-    const rotation = degrees.map((value) => THREE.MathUtils.degToRad(value));
-    const model = side === 'Left' ? leftCalibrationModel : calibrationModel;
-    if (model) model.rotation.set(...rotation);
-    rotationValues[side].forEach((output, index) => { output.value = `${degrees[index]}°`; });
-    rotationCoordinates[side].textContent = `${side === 'Left' ? 'L' : 'R'} X: ${degrees[0]}°  Y: ${degrees[1]}°  Z: ${degrees[2]}°`;
-  }
-  if (calibrationModel) calibrationModel.position.x = THREE.MathUtils.clamp(Number(positionInputs.Right.value), 0.1, 2);
-  if (leftCalibrationModel) leftCalibrationModel.position.x = THREE.MathUtils.clamp(Number(positionInputs.Left.value), -2, -0.1);
-  positionValues.Left.value = positionInputs.Left.value;
-  positionValues.Right.value = positionInputs.Right.value;
-}
-
-Object.values(rotationInputs).flat().forEach((input) => input.addEventListener('input', updateCalibrationModel));
-Object.values(positionInputs).forEach((input) => input.addEventListener('input', updateCalibrationModel));
-
 async function startCamera() {
   if (cameraStarting || (xrSessionActive && xrSessionMode === 'ar')) return;
   if (!navigator.mediaDevices?.getUserMedia) {
@@ -302,8 +145,8 @@ async function startCamera() {
         numHands: 2,
         minHandDetectionConfidence: 0.6,
         minHandPresenceConfidence: 0.6,
-        minTrackingConfidence: 0.5,
-      });
+          minTrackingConfidence: 0.5,
+        });
     }
     cameraVideo.classList.add('visible');
     landmarkCanvas.classList.add('visible');
@@ -363,15 +206,28 @@ async function switchCamera() {
   await startCamera();
 }
 
-function cameraPoint(landmark, handedness = 'Right') {
+function cameraPoint(landmark, handedness = 'Right', handDepth = 0) {
   const normalizedX = cameraMirror ? 0.5 - landmark.x : landmark.x - 0.5;
-  const point = new THREE.Vector3(normalizedX * 3.1, 2.25 - landmark.y * 2.1, 0.05);
-  if (cardboardMode && !xrSessionActive) {
-    point.sub(camera.position).applyQuaternion(camera.quaternion).add(camera.position);
-  } else if (xrSessionActive && simulationStarted) {
-    point.applyMatrix4(simulationRoot.matrix);
-  }
+  const landmarkDepth = -(landmark.z || 0) * CAMERA_LANDMARK_DEPTH_SCALE;
+  const point = new THREE.Vector3(
+    normalizedX * 3.1,
+    2.25 - landmark.y * 2.1,
+    renderer.xr.isPresenting ? -0.9 + handDepth + landmarkDepth : 0.05 + handDepth + landmarkDepth,
+  );
+  if (renderer.xr.isPresenting) renderer.xr.getCamera(camera).localToWorld(point);
   return point;
+}
+
+function cameraHandDepth(landmarks) {
+  const handSize = Math.hypot(
+    landmarks[0].x - landmarks[12].x,
+    landmarks[0].y - landmarks[12].y,
+  );
+  return THREE.MathUtils.clamp(
+    (handSize - CAMERA_HAND_REFERENCE_SIZE) * CAMERA_HAND_DEPTH_SCALE,
+    -CAMERA_HAND_DEPTH_LIMIT,
+    CAMERA_HAND_DEPTH_LIMIT,
+  );
 }
 
 function createCameraHandVisual() {
@@ -435,97 +291,12 @@ function createCameraHandVisual() {
   return group;
 }
 
-function applyKalidokitHand(group, worldLandmarks, handedness, points, pinching) {
-  if (!group.userData.model || !worldLandmarks?.length) return;
-  const solved = Hand.solve(worldLandmarks, handedness);
-  if (!solved) return;
-  const side = handedness === 'Left' ? 'Left' : 'Right';
-  const fingers = {
-    thumb: ['Proximal', 'Intermediate', 'Distal'],
-    index: ['Proximal', 'Intermediate', 'Distal'],
-    midd: ['Proximal', 'Intermediate', 'Distal'],
-    ring: ['Proximal', 'Intermediate', 'Distal'],
-    pinky: ['Proximal', 'Intermediate', 'Distal'],
-  };
-  const segments = {
-    thumb: ['trapez', 'meta', 'prox'],
-    index: ['meta', 'prox', 'midd'],
-    midd: ['meta', 'prox', 'midd'],
-    ring: ['meta', 'prox', 'midd'],
-    pinky: ['meta', 'prox', 'midd'],
-  };
-  for (const [finger, kalidoSegments] of Object.entries(fingers)) {
-    kalidoSegments.forEach((segment, index) => {
-      const rotation = solved[`${side}${finger === 'midd' ? 'Middle' : finger[0].toUpperCase() + finger.slice(1)}${segment}`];
-      const bone = group.userData.model.getObjectByName(`${finger}_${segments[finger][index]}`);
-      if (rotation && bone) {
-        const rest = group.userData.rigBones.find((entry) => entry.bone === bone)?.restLocalQuaternion;
-        const pose = new THREE.Quaternion().setFromEuler(
-          new THREE.Euler(-rotation.x, rotation.y, handedness === 'Right' ? -rotation.z : rotation.z),
-        );
-        bone.quaternion.copy(rest || new THREE.Quaternion()).multiply(pose);
-      }
-    });
-  }
-  if (pinching) {
-    const curl = handedness === 'Right' ? 0.9 : -0.9;
-    const curlQuaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, curl));
-    for (const entry of group.userData.rigBones || []) {
-      if (!entry.restLocalQuaternion) continue;
-      const target = entry.restLocalQuaternion.clone().multiply(curlQuaternion);
-      entry.bone.quaternion.slerp(target, 0.35);
-    }
-  }
-}
-
-function updatePoseAnimation(group, pinching) {
-  const action = group.userData.poseAction;
-  if (!action) return;
-  if (pinching && !group.userData.poseActive) {
-    action.reset().play();
-    group.userData.poseActive = true;
-  } else if (!pinching && group.userData.poseActive) {
-    action.stop().reset();
-    group.userData.poseActive = false;
-  }
-}
-
-function updateCameraHandVisual(group, landmarks, worldLandmarks, handedness, pinching) {
-   const points = landmarks.map((landmark) => cameraPoint(landmark, handedness));
+function updateCameraHandVisual(group, landmarks) {
+    const handDepth = cameraHandDepth(landmarks);
+    const points = landmarks.map((landmark) => cameraPoint(landmark, 'Right', handDepth));
    const palm = new THREE.Vector3()
      .add(points[0]).add(points[5]).add(points[9]).add(points[13]).add(points[17])
      .multiplyScalar(0.2);
-    if (group.userData.modelSide !== handedness && group.userData.model) {
-      group.remove(group.userData.model);
-      group.userData.model = null;
-    }
-    if (!group.userData.model && handModelTemplates[handedness]) {
-      attachHandModel(group, handModelTemplates[handedness]);
-      group.userData.modelSide = handedness;
-    }
-   if (group.userData.model) {
-     const palm = new THREE.Vector3()
-       .add(points[0]).add(points[5]).add(points[9]).add(points[13]).add(points[17])
-       .multiplyScalar(0.2);
-     const handLength = points[0].distanceTo(points[12]);
-     group.userData.model.scale.setScalar(handLength * HAND_MODEL_SCALE);
-       const baseRotation = HAND_MODEL_ROTATIONS[handedness].map((value) => THREE.MathUtils.degToRad(value));
-       const palmDirection = worldLandmarks?.[17] && worldLandmarks?.[5]
-         ? {
-             x: worldLandmarks[17].x - worldLandmarks[5].x,
-             z: worldLandmarks[17].z - worldLandmarks[5].z,
-           }
-         : null;
-       const landmarkYaw = palmDirection
-         ? THREE.MathUtils.clamp(Math.atan2(palmDirection.z, -palmDirection.x), -LANDMARK_Y_ROTATION_LIMIT, LANDMARK_Y_ROTATION_LIMIT)
-         : 0;
-       const rotation = [baseRotation[0], baseRotation[1] + landmarkYaw, baseRotation[2]];
-      group.userData.model.rotation.set(...rotation);
-     group.userData.model.position.copy(palm);
-     group.userData.model.position.x += HAND_MODEL_X_OFFSET;
-     group.userData.model.position.y += HAND_MODEL_Y_OFFSET;
-     group.userData.model.position.z += HAND_MODEL_Z_OFFSET;
-   }
    group.userData.joints.forEach((joint, index) => joint.position.copy(points[index]));
    group.userData.labels.forEach((label, index) => {
      label.position.copy(points[index]);
@@ -540,67 +311,30 @@ function updateCameraHandVisual(group, landmarks, worldLandmarks, handedness, pi
    group.userData.palm.position.copy(palm);
    group.userData.palm.scale.set(palmWidth * 0.45, palmWidth * 0.3, palmWidth * 0.1);
    group.visible = true;
-   try {
-     updatePoseAnimation(group, pinching);
-   } catch (error) {
-     console.error('No se pudo animar el modelo de mano:', error);
-   }
-}
-
-function updateInteractiveHand(points) {
-  if (!interactiveHand || !points.length) return;
-  const palm = new THREE.Vector3()
-    .add(points[0])
-    .add(points[5])
-    .add(points[9])
-    .add(points[13])
-    .add(points[17])
-    .multiplyScalar(0.2);
-  const touchesModel = points.some((point) => point.distanceTo(interactiveHand.position) < 0.55);
-  if (touchesModel && !handGrabbed) {
-    handGrabbed = true;
-    handGrabOffset.copy(interactiveHand.position).sub(palm);
-  } else if (!touchesModel && handGrabbed) {
-    handGrabbed = false;
-  }
-  if (handGrabbed) interactiveHand.position.copy(palm).add(handGrabOffset);
-  if (!interactiveHand.userData.model) return;
-  interactiveHand.userData.model.updateMatrixWorld(true);
-  for (const entry of interactiveHand.userData.rigBones || []) {
-    const targetDirection = points[entry.end].clone().sub(points[entry.start]);
-    if (targetDirection.lengthSq() < 0.000001 || entry.restDirection.lengthSq() < 0.000001) continue;
-    const delta = new THREE.Quaternion().setFromUnitVectors(
-      entry.restDirection.clone().normalize(),
-      targetDirection.normalize(),
-    );
-    const targetWorldQuaternion = delta.multiply(entry.restQuaternion);
-    if (entry.bone.parent) {
-      const parentWorldQuaternion = entry.bone.parent.getWorldQuaternion(new THREE.Quaternion());
-      entry.bone.quaternion.copy(parentWorldQuaternion.invert().multiply(targetWorldQuaternion));
-    } else {
-      entry.bone.quaternion.copy(targetWorldQuaternion);
-    }
-    entry.bone.updateMatrixWorld(true);
-  }
-}
+ }
 
 function drawLandmarks(landmarks) {
   landmarkCanvas.width = cameraVideo.videoWidth;
   landmarkCanvas.height = cameraVideo.videoHeight;
   landmarkContext.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height);
+
+  const toCanvasPoint = (point) => ({
+    x: (cameraMirror ? 1 - point.x : point.x) * landmarkCanvas.width,
+    y: point.y * landmarkCanvas.height,
+  });
   landmarkContext.fillStyle = '#72f8dd';
   for (const hand of landmarks) {
     for (const point of [hand[4], hand[8]]) {
       landmarkContext.beginPath();
-       const x = (cameraMirror ? 1 - point.x : point.x) * landmarkCanvas.width;
-       landmarkContext.arc(x, point.y * landmarkCanvas.height, 11, 0, Math.PI * 2);
-      landmarkContext.fill();
+       const canvasPoint = toCanvasPoint(point);
+       landmarkContext.arc(canvasPoint.x, canvasPoint.y, 11, 0, Math.PI * 2);
+       landmarkContext.fill();
     }
   }
 }
 
 function updateCameraHands() {
-  if (!handLandmarker || cameraVideo.readyState < 2 || cameraVideo.currentTime === lastVideoTime) return;
+  if (renderer.xr.isPresenting || !handLandmarker || cameraVideo.readyState < 2 || cameraVideo.currentTime === lastVideoTime) return;
   lastVideoTime = cameraVideo.currentTime;
    let result;
    try {
@@ -610,35 +344,31 @@ function updateCameraHands() {
      return;
    }
    const seen = new Set();
-   drawLandmarks(result.landmarks || []);
-   if (!(result.landmarks || []).length) handGrabbed = false;
-   (result.landmarks || []).forEach((landmarks, index) => {
+     drawLandmarks(result.landmarks || []);
+    (result.landmarks || []).forEach((landmarks, index) => {
       const source = `camera-${index}`;
       seen.add(source);
-      const handedness = result.handednesses?.[index]?.[0]?.categoryName || 'Right';
-      const pinching = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y) < 0.075;
-     const handVisual = cameraHandVisuals[index] || createCameraHandVisual();
-     updateCameraHandVisual(
-       handVisual,
-        landmarks,
-        result.worldLandmarks?.[index],
-         handedness,
-        pinching,
-      );
-      updateInteractiveHand(landmarks.map((landmark) => cameraPoint(landmark, handedness)));
+       const handedness = result.handednesses?.[index]?.[0]?.categoryName || 'Right';
+       const pinching = Math.hypot(landmarks[4].x - landmarks[8].x, landmarks[4].y - landmarks[8].y) < 0.075;
+      const handDepth = cameraHandDepth(landmarks);
+      const handVisual = cameraHandVisuals[index] || createCameraHandVisual();
+      updateCameraHandVisual(handVisual, landmarks);
      const point = cameraPoint({
-       x: (landmarks[4].x + landmarks[8].x) / 2,
-       y: (landmarks[4].y + landmarks[8].y) / 2,
-     }, handedness);
+        x: (landmarks[4].x + landmarks[8].x) / 2,
+        y: (landmarks[4].y + landmarks[8].y) / 2,
+        z: (landmarks[4].z + landmarks[8].z) / 2,
+      }, handedness, handDepth);
     if (pinching && !cameraPinches.get(source)) startGrab(source, point);
     if (!pinching && cameraPinches.get(source)) endGrab(source);
      cameraPinches.set(source, pinching);
-      const grab = grabbedBy.get(source);
-      if (grab) {
-        const now = performance.now();
-        const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
-        grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
-       grab.object.position.copy(point).add(grab.offset);
+     const grab = grabbedBy.get(source);
+     if (grab) {
+       const now = performance.now();
+       const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
+       grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
+        handWorldPosition.copy(point).add(grab.offset);
+        if (grab.object.parent) grab.object.parent.worldToLocal(handWorldPosition);
+        grab.object.position.copy(handWorldPosition);
        grab.lastPoint.copy(point);
        grab.lastTime = now;
      }
@@ -725,18 +455,9 @@ function setupInput(index) {
 
   const hand = renderer.xr.getHand(index);
   hand.userData.handedness = index === 0 ? 'left' : 'right';
-  hand.add(handFactory.createHandModel(hand, 'mesh'));
-  hand.traverse((part) => {
-    if (!part.isMesh && !part.isSkinnedMesh) return;
-    part.renderOrder = 10;
-    const materials = Array.isArray(part.material) ? part.material : [part.material];
-    materials.forEach((material) => {
-      if (!material) return;
-      material.depthTest = false;
-      material.depthWrite = false;
-      material.needsUpdate = true;
-    });
-  });
+  // Usa las articulaciones WebXR directamente para evitar una orientación
+  // adicional del modelo de mano.
+  hand.add(handFactory.createHandModel(hand, 'spheres'));
   hand.addEventListener('pinchstart', (event) => startGrab(event.target, getPinchPosition(event.target)));
   hand.addEventListener('pinchend', (event) => endGrab(event.target));
   hands.push(hand);
@@ -763,10 +484,11 @@ function startGrab(source, point) {
     }
   }
   if (!nearest) return;
+  nearest.getWorldPosition(handWorldPosition);
    grabbedBy.set(source, {
-      object: nearest,
-      offset: nearest.position.clone().sub(point),
-      lastPoint: point.clone(),
+     object: nearest,
+     offset: handWorldPosition.clone().sub(point),
+     lastPoint: point.clone(),
      lastTime: performance.now(),
      velocity: new THREE.Vector3(),
    });
@@ -795,7 +517,9 @@ function updateHands() {
       const now = performance.now();
      const elapsed = Math.max((now - grab.lastTime) / 1000, 0.001);
      grab.velocity.copy(point).sub(grab.lastPoint).multiplyScalar(1 / elapsed);
-     grab.object.position.copy(point).add(grab.offset);
+      handWorldPosition.copy(point).add(grab.offset);
+      if (grab.object.parent) grab.object.parent.worldToLocal(handWorldPosition);
+      grab.object.position.copy(handWorldPosition);
      grab.lastPoint.copy(point);
      grab.lastTime = now;
      grab.object.rotation.y += 0.012;
@@ -821,44 +545,20 @@ function updatePhysics(delta) {
   }
 }
 
-async function requestXRHitTestSource() {
-  const session = renderer.xr.getSession();
-  if (!session || hitTestSourceRequested) return;
-  hitTestSourceRequested = true;
-  try {
-    const viewerSpace = await session.requestReferenceSpace('viewer');
-    hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
-  } catch (error) {
-    hitTestSourceRequested = false;
-    console.error('No se pudo iniciar la detección de superficies:', error);
-  }
-}
-
-function updateXRSurface() {
-  if (xrSessionMode !== 'ar' || !xrSessionActive || !hitTestSource || simulationStarted) return;
-  const frame = renderer.xr.getFrame();
-  const referenceSpace = renderer.xr.getReferenceSpace();
-  if (!frame || !referenceSpace) return;
-
-  const hit = frame.getHitTestResults(hitTestSource).map((result) => {
-    const pose = result.getPose(referenceSpace);
-    if (!pose) return null;
-    const matrix = pose.transform.matrix;
-    const normalY = Math.abs(matrix[5]);
-    if (normalY > 0.85) return { result, pose };
-    return null;
-  }).filter(Boolean)[0];
-  if (!hit) return;
-
-  const { pose } = hit;
-  surfaceMatrix.fromArray(pose.transform.matrix);
-  reticle.matrix.copy(surfaceMatrix);
-  reticle.visible = true;
-
-  simulationRoot.matrix.copy(surfaceMatrix);
-  simulationRoot.matrix.decompose(simulationRoot.position, simulationRoot.quaternion, simulationRoot.scale);
-  simulationRoot.visible = true;
-  simulationStarted = true;
+function applySceneLayout(immersive) {
+  objects.forEach((object, index) => {
+    const home = initialTransforms[index];
+    object.position.copy(home.position);
+    if (immersive) {
+      object.position.y -= 1.55;
+      object.position.z -= XR_OBJECT_DISTANCE;
+    }
+    object.quaternion.copy(home.quaternion);
+    object.userData.velocity.set(0, 0, 0);
+    object.userData.physicsActive = false;
+    object.userData.grabbed = false;
+    object.userData.baseMaterial.emissiveIntensity = 0;
+  });
 }
 
 renderer.xr.addEventListener('sessionstart', () => {
@@ -875,8 +575,11 @@ renderer.xr.addEventListener('sessionstart', () => {
     simulationRoot.visible = true;
   }
   controls.enabled = false;
+  applySceneLayout(true);
+  floor.position.y = -1.55;
+  grid.position.y = -1.544;
   cameraPinches.clear();
-  grabbedBy.clear();
+  cameraHandVisuals.forEach((visual) => { visual.visible = false; });
 });
 renderer.xr.addEventListener('sessionend', () => {
   xrSessionActive = false;
@@ -888,27 +591,16 @@ renderer.xr.addEventListener('sessionend', () => {
   simulationStarted = true;
   controls.enabled = !cardboardMode;
   grabbedBy.clear();
-  xrSessionMode = undefined;
+  applySceneLayout(false);
+  floor.position.y = 0;
+  grid.position.y = 0.006;
 });
 
 setupInput(0);
 setupInput(1);
-const vrButton = VRButton.createButton(renderer, { optionalFeatures: ['hand-tracking'] });
-vrButton.classList.add('VRButton');
-vrButton.textContent = 'Entrar en VR';
-vrButton.addEventListener('click', () => { xrSessionMode = 'vr'; });
-controlBar.appendChild(vrButton);
-
-const arButton = ARButton.createButton(renderer, {
-  requiredFeatures: ['hit-test', 'local-floor'],
-  optionalFeatures: ['plane-detection', 'hand-tracking'],
-});
-arButton.classList.add('ARButton');
-arButton.textContent = 'Entrar en AR';
-arButton.addEventListener('click', () => {
-  xrSessionMode = 'ar';
-});
-controlBar.appendChild(arButton);
+document.body.appendChild(VRButton.createButton(renderer, {
+  requiredFeatures: ['hand-tracking'],
+}));
 cameraToggle.addEventListener('click', startCamera);
 cameraSwitch.addEventListener('click', switchCamera);
 cardboardToggle.addEventListener('click', () => {
@@ -917,13 +609,7 @@ cardboardToggle.addEventListener('click', () => {
 });
 
 document.querySelector('#reset').addEventListener('click', () => {
-  objects.forEach((object, index) => {
-    object.position.copy(initialTransforms[index].position);
-    object.quaternion.copy(initialTransforms[index].quaternion);
-     object.userData.baseMaterial.emissiveIntensity = 0;
-     object.userData.velocity.set(0, 0, 0);
-     object.userData.physicsActive = false;
-  });
+  applySceneLayout(renderer.xr.isPresenting);
 });
 
 window.addEventListener('resize', () => {
@@ -941,8 +627,7 @@ renderer.setAnimationLoop(() => {
   updateCameraHands();
   updateXRSurface();
    const delta = handClock.getDelta();
-   handMixers.forEach((mixer) => mixer.update(delta));
-   updatePhysics(delta);
+    updatePhysics(delta);
   updateHands();
    for (const object of objects) {
      if (simulationStarted && !object.userData.grabbed) object.rotation.y += 0.0025;

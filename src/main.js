@@ -464,6 +464,19 @@ function updatePhysics(delta) {
     const velocity = object.userData.velocity;
     velocity.y -= 9.8 * delta;
     object.position.addScaledVector(velocity, delta);
+    if (renderer.xr.isPresenting) {
+      const returnZ = object.userData.home.position.z - XR_OBJECT_DISTANCE;
+      const distanceFromZone = returnZ - object.position.z;
+      if (distanceFromZone > 0) {
+        // A soft spring brings thrown objects back to the reachable VR zone.
+        velocity.z += Math.min(distanceFromZone * 8, 6) * delta;
+        velocity.z *= Math.pow(0.985, delta * 60);
+        if (distanceFromZone > 0.75) {
+          object.position.z = returnZ - 0.75;
+          velocity.z = Math.abs(velocity.z) * 0.55;
+        }
+      }
+    }
     if (object.position.y < object.userData.radius) {
       object.position.y = object.userData.radius;
       if (velocity.y < 0) velocity.y = -velocity.y * 0.72;

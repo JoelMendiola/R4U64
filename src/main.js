@@ -31,7 +31,7 @@ const CAMERA_HAND_DEPTH_SCALE = 3;
 const CAMERA_HAND_DEPTH_LIMIT = 0.65;
 const CAMERA_LANDMARK_DEPTH_SCALE = 1.5;
 const MEDIAPIPE_VERSION = '0.10.35';
-const XR_OBJECT_DISTANCE = 1.25;
+const XR_OBJECT_DISTANCE = 0.9;
 const handConnections = [
   [0, 1], [1, 2], [2, 3], [3, 4],
   [0, 5], [5, 6], [6, 7], [7, 8],

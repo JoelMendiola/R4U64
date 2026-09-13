@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FilesetResolver, HandLandmarker, PoseLandmarker } from '@mediapipe/tasks-vision';
+import { FilesetResolver, HandLandmarker } from '@mediapipe/tasks-vision';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { VRButton } from 'three/addons/webxr/VRButton.js';
 import { XRControllerModelFactory } from 'three/addons/webxr/XRControllerModelFactory.js';
@@ -20,7 +20,6 @@ const hands = [];
 const grabbedBy = new Map();
 const initialTransforms = [];
 let handLandmarker;
-let poseLandmarker;
 let cameraStream;
 let cameraFacingMode = 'user';
 let cameraMirror = true;
@@ -41,15 +40,8 @@ const handConnections = [
   [0, 17], [17, 18], [18, 19], [19, 20],
   [5, 9], [9, 13], [13, 17],
 ];
-const poseConnections = [
-  [11, 13], [13, 15], [12, 14], [14, 16],
-  [11, 12], [11, 23], [12, 24], [23, 24],
-  [23, 25], [25, 27], [27, 29], [29, 31],
-  [24, 26], [26, 28], [28, 30], [30, 32],
-];
 const pinchPoint = new THREE.Vector3();
 const handWorldPosition = new THREE.Vector3();
-const poseWorldPoint = new THREE.Vector3();
 
 const scene = new THREE.Scene();
 
@@ -62,7 +54,7 @@ renderer.setSize(sceneHost.clientWidth, sceneHost.clientHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.shadowMap.enabled = true;
 renderer.xr.enabled = true;
-renderer.xr.setReferenceSpaceType('local-floor');
+renderer.xr.setReferenceSpaceType('local');
 sceneHost.appendChild(renderer.domElement);
 const stereoEffect = new StereoEffect(renderer);
 let cardboardMode = false;
@@ -101,17 +93,6 @@ async function startCamera() {
         minHandPresenceConfidence: 0.6,
           minTrackingConfidence: 0.5,
         });
-      poseLandmarker = await PoseLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task',
-          delegate: 'CPU',
-        },
-        runningMode: 'VIDEO',
-        numPoses: 1,
-        minPoseDetectionConfidence: 0.55,
-        minPosePresenceConfidence: 0.55,
-        minTrackingConfidence: 0.5,
-      });
     }
     cameraVideo.classList.add('visible');
     landmarkCanvas.classList.add('visible');
@@ -191,61 +172,6 @@ function cameraHandDepth(landmarks) {
   );
 }
 
-function posePoint(landmark) {
-  const point = new THREE.Vector3(
-    (cameraMirror ? 0.5 - landmark.x : landmark.x - 0.5) * 3.1,
-    2.25 - landmark.y * 2.1,
-    -1.35 - (landmark.z || 0) * 0.7,
-  );
-  if (renderer.xr.isPresenting) renderer.xr.getCamera(camera).localToWorld(point);
-  return point;
-}
-
-function createPoseVisual() {
-  const group = new THREE.Group();
-  const jointMaterial = new THREE.MeshBasicMaterial({ color: 0xffc08a, depthTest: false });
-  const boneMaterial = new THREE.LineBasicMaterial({ color: 0xff9f68, linewidth: 3, depthTest: false });
-  group.userData.joints = Array.from({ length: 33 }, () => {
-    const joint = new THREE.Mesh(new THREE.SphereGeometry(0.025, 8, 6), jointMaterial);
-    joint.visible = false;
-    group.add(joint);
-    return joint;
-  });
-  group.userData.bones = poseConnections.map(([start, end]) => {
-    const bone = new THREE.Line(new THREE.BufferGeometry(), boneMaterial);
-    bone.userData.connection = [start, end];
-    bone.visible = false;
-    group.add(bone);
-    return bone;
-  });
-  group.visible = false;
-  scene.add(group);
-  return group;
-}
-
-const poseVisual = createPoseVisual();
-
-function updatePoseVisual(landmarks) {
-  if (!renderer.xr.isPresenting || !landmarks?.length) {
-    poseVisual.visible = false;
-    return;
-  }
-  const points = landmarks.map(posePoint);
-  poseVisual.userData.joints.forEach((joint, index) => {
-    const landmark = landmarks[index];
-    joint.position.copy(points[index]);
-    joint.visible = (landmark.visibility ?? 1) >= 0.4;
-  });
-  poseVisual.userData.bones.forEach((bone) => {
-    const [start, end] = bone.userData.connection;
-    const visible = (landmarks[start].visibility ?? 1) >= 0.4
-      && (landmarks[end].visibility ?? 1) >= 0.4;
-    bone.geometry.setFromPoints([points[start], points[end]]);
-    bone.visible = visible;
-  });
-  poseVisual.visible = true;
-}
-
 function createCameraHandVisual() {
   const group = new THREE.Group();
    const jointMaterial = new THREE.MeshStandardMaterial({
@@ -322,7 +248,7 @@ function updateCameraHandVisual(group, landmarks) {
    group.visible = true;
  }
 
-function drawLandmarks(landmarks, poseLandmarks = []) {
+function drawLandmarks(landmarks) {
   landmarkCanvas.width = cameraVideo.videoWidth;
   landmarkCanvas.height = cameraVideo.videoHeight;
   landmarkContext.clearRect(0, 0, landmarkCanvas.width, landmarkCanvas.height);
@@ -331,29 +257,6 @@ function drawLandmarks(landmarks, poseLandmarks = []) {
     x: (cameraMirror ? 1 - point.x : point.x) * landmarkCanvas.width,
     y: point.y * landmarkCanvas.height,
   });
-  const drawLimb = (landmarks, color, jointColor, width) => {
-    if (landmarks.some((point) => !point || (point.visibility ?? 1) < 0.4)) return;
-    const points = landmarks.map(toCanvasPoint);
-    landmarkContext.beginPath();
-    landmarkContext.moveTo(points[0].x, points[0].y);
-    points.slice(1).forEach((point) => landmarkContext.lineTo(point.x, point.y));
-    landmarkContext.strokeStyle = color;
-    landmarkContext.lineWidth = width;
-    landmarkContext.lineCap = 'round';
-    landmarkContext.stroke();
-    landmarkContext.fillStyle = jointColor;
-    points.forEach((point) => {
-      landmarkContext.beginPath();
-      landmarkContext.arc(point.x, point.y, width * 0.7, 0, Math.PI * 2);
-      landmarkContext.fill();
-    });
-  };
-
-  drawLimb([poseLandmarks[11], poseLandmarks[13], poseLandmarks[15]], '#b084ff', '#d2bdff', 14);
-  drawLimb([poseLandmarks[12], poseLandmarks[14], poseLandmarks[16]], '#b084ff', '#d2bdff', 14);
-  drawLimb([poseLandmarks[23], poseLandmarks[25], poseLandmarks[27], poseLandmarks[31]], '#ff9f68', '#ffd0ad', 16);
-  drawLimb([poseLandmarks[24], poseLandmarks[26], poseLandmarks[28], poseLandmarks[32]], '#ff9f68', '#ffd0ad', 16);
-
   landmarkContext.fillStyle = '#72f8dd';
   for (const hand of landmarks) {
     for (const point of [hand[4], hand[8]]) {
@@ -366,16 +269,8 @@ function drawLandmarks(landmarks, poseLandmarks = []) {
 }
 
 function updateCameraHands() {
-  if ((!handLandmarker && !poseLandmarker) || cameraVideo.readyState < 2 || cameraVideo.currentTime === lastVideoTime) return;
+  if (renderer.xr.isPresenting || !handLandmarker || cameraVideo.readyState < 2 || cameraVideo.currentTime === lastVideoTime) return;
   lastVideoTime = cameraVideo.currentTime;
-   let poseResult;
-   try {
-     poseResult = poseLandmarker?.detectForVideo(cameraVideo, performance.now());
-     updatePoseVisual(poseResult?.landmarks?.[0] || []);
-   } catch (error) {
-     console.error('Error detectando cuerpo:', error);
-   }
-   if (renderer.xr.isPresenting || !handLandmarker) return;
    let result;
    try {
      result = handLandmarker.detectForVideo(cameraVideo, performance.now());
@@ -384,7 +279,7 @@ function updateCameraHands() {
      return;
    }
    const seen = new Set();
-     drawLandmarks(result.landmarks || [], poseResult?.landmarks?.[0] || []);
+     drawLandmarks(result.landmarks || []);
     (result.landmarks || []).forEach((landmarks, index) => {
       const source = `camera-${index}`;
       seen.add(source);
@@ -588,7 +483,10 @@ function applySceneLayout(immersive) {
   objects.forEach((object, index) => {
     const home = initialTransforms[index];
     object.position.copy(home.position);
-    if (immersive) object.position.z -= XR_OBJECT_DISTANCE;
+    if (immersive) {
+      object.position.y -= 1.55;
+      object.position.z -= XR_OBJECT_DISTANCE;
+    }
     object.quaternion.copy(home.quaternion);
     object.userData.velocity.set(0, 0, 0);
     object.userData.physicsActive = false;
@@ -600,20 +498,23 @@ function applySceneLayout(immersive) {
 renderer.xr.addEventListener('sessionstart', () => {
   controls.enabled = false;
   applySceneLayout(true);
+  floor.position.y = -1.55;
+  grid.position.y = -1.544;
   cameraPinches.clear();
   cameraHandVisuals.forEach((visual) => { visual.visible = false; });
 });
 renderer.xr.addEventListener('sessionend', () => {
   controls.enabled = true;
   grabbedBy.clear();
-  poseVisual.visible = false;
   applySceneLayout(false);
+  floor.position.y = 0;
+  grid.position.y = 0.006;
 });
 
 setupInput(0);
 setupInput(1);
 document.body.appendChild(VRButton.createButton(renderer, {
-  requiredFeatures: ['local-floor', 'hand-tracking'],
+  requiredFeatures: ['hand-tracking'],
 }));
 cameraToggle.addEventListener('click', startCamera);
 cameraSwitch.addEventListener('click', switchCamera);
